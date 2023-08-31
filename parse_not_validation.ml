@@ -12,8 +12,6 @@ let rec eval = function
   | Repeat (num, ast) ->
       repeat num (eval ast)
 
-let input_a = "3[ab]ac2[cd]"
-
 (* 1. lookahead one token to decide the rule 2. construct left most derivation *)
 
 type 'a parsec = char list -> ('a * char list) option
@@ -46,13 +44,9 @@ let rec split_until pred = function
   | [] ->
       ([], [])
 
-let is_digit c =
-  let code = Char.code c in
-  code >= Char.code '0' && code <= Char.code '9'
+let is_digit = function '0' .. '9' -> true | _ -> false
 
-let is_alpha c =
-  let code = Char.code c in
-  code >= Char.code 'a' && code <= Char.code 'z'
+let is_alpha = function 'a' .. 'z' -> true | _ -> false
 
 let parse_digit : int parsec =
  fun input ->
@@ -99,40 +93,66 @@ and parse_repeat input =
 
 let parse str = str |> String.to_seq |> List.of_seq |> parse_ast
 
-let test_parse input_str expected _ =
-  let parsed_result = parse input_str in
-  match parsed_result with
-  | Some (result, rest) ->
-      OUnit2.assert_bool "must be empty" (rest = []) ;
-      OUnit2.assert_equal result expected
-  | None ->
-      OUnit2.assert_failure "failed in parsing"
+module ProperParser = struct
+  open Angstrom
+
+  let ast_parser =
+    fix (fun ast_parser ->
+        let* c = peek_char in
+        match c with
+        | None ->
+            return End
+        | Some ']' ->
+            return End
+        | Some a ->
+            let+ ast =
+              if is_digit a then
+                let+ number = take_while1 is_digit >>| int_of_string <* char '['
+                and+ sub_ast = ast_parser <* char ']' in
+                Repeat (number, sub_ast)
+              else
+                let+ x = take_while1 is_alpha in
+                Str x
+            and+ rest = ast_parser in
+            Concat (ast, rest) )
+
+  let parse input =
+    input
+    |> parse_string ~consume:All ast_parser
+    |> Result.to_option
+    |> Option.map (fun x -> (x, []))
+end
 
 open OUnit2
 
-let test_eval input_str expected =
+let test_eval parse input_str expected =
   input_str
   >:: fun ctx ->
   let parsed_result = parse input_str in
   match parsed_result with
   | Some (result, rest) ->
-      OUnit2.assert_bool "must be empty" (rest = []) ;
-      OUnit2.assert_equal (eval result) expected
+      assert_bool "must be empty" (rest = []) ;
+      assert_equal (eval result) expected
   | None ->
-      OUnit2.assert_failure "failed in parsing"
+      assert_failure "failed in parsing"
 
-let test_1 = test_eval "3[a]" "aaa"
+let test_methods = [test_eval parse; test_eval ProperParser.parse]
 
-let test_2 = test_eval "3[a]dc" "aaadc"
-
-let test_3 = test_eval "3[ab]ac2[cd]" "abababaccdcd"
-
-let test_4 = test_eval "3[a2[cd]ef]g" "acdcdefacdcdefacdcdefg"
-
-let test_4 =
-  test_eval "4[3[a2[d]]b]3[ab]2[2[f]]"
-    "addaddaddbaddaddaddbaddaddaddbaddaddaddbabababffff"
+let test_cases =
+  [ ("3[a]", "aaa")
+  ; ("3[a]dc", "aaadc")
+  ; ("3[ab]ac2[cd]", "abababaccdcd")
+  ; ("3[a2[cd]ef]g", "acdcdefacdcdefacdcdefg")
+  ; ( "4[3[a2[d]]b]3[ab]2[2[f]]"
+    , "addaddaddbaddaddaddbaddaddaddbaddaddaddbabababffff" ) ]
 
 let () =
-  let suite = "suite" >::: [test_1; test_2; test_3; test_4] in
+  let suite =
+    "suite"
+    >:::
+    let open Base.List in
+    test_methods
+    >>= fun check ->
+    test_cases >>= fun (input, output) -> return (check input output)
+  in
   run_test_tt_main suite

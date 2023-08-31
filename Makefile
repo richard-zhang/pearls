@@ -8,7 +8,7 @@ clean:
 	rm -rf a.out
 
 build:
-	ocamlfind opt -package alcotest,lwt,lwt.unix,lwt_domain,ounit2 -thread -linkpkg $(file).ml
+	ocamlfind opt -package base,angstrom,alcotest,lwt,lwt.unix,lwt_domain,ounit2 -thread -linkpkg $(file).ml
 	./a.out
 	
 
