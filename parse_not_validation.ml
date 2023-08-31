@@ -1,5 +1,17 @@
 type ast = Repeat of int * ast | Str of string | Concat of ast * ast | End
 
+let rec repeat n str = if n = 0 then "" else str ^ repeat (n - 1) str
+
+let rec eval = function
+  | Str str ->
+      str
+  | End ->
+      ""
+  | Concat (left, right) ->
+      eval left ^ eval right
+  | Repeat (num, ast) ->
+      repeat num (eval ast)
+
 let input_a = "3[ab]ac2[cd]"
 
 (* 1. lookahead one token to decide the rule 2. construct left most derivation *)
@@ -63,14 +75,14 @@ let rec parse_ast input =
   (* ll 1*)
   match input with
   | [] ->
-      parse_end input
+      Some (End, [])
+  | ']' :: _ ->
+      Some (End, input)
   | x :: _ ->
       (let* ast = if is_digit x then parse_repeat else parse_str in
        let* rest = parse_ast in
        return (Concat (ast, rest)) )
         input
-
-and parse_end input = (return End) input
 
 and parse_str input =
   (let+ string = parse_string in
@@ -84,3 +96,43 @@ and parse_repeat input =
    let* _ = parse_char ']' in
    return (Repeat (digit, sub_expression)) )
     input
+
+let parse str = str |> String.to_seq |> List.of_seq |> parse_ast
+
+let test_parse input_str expected _ =
+  let parsed_result = parse input_str in
+  match parsed_result with
+  | Some (result, rest) ->
+      OUnit2.assert_bool "must be empty" (rest = []) ;
+      OUnit2.assert_equal result expected
+  | None ->
+      OUnit2.assert_failure "failed in parsing"
+
+open OUnit2
+
+let test_eval input_str expected =
+  input_str
+  >:: fun ctx ->
+  let parsed_result = parse input_str in
+  match parsed_result with
+  | Some (result, rest) ->
+      OUnit2.assert_bool "must be empty" (rest = []) ;
+      OUnit2.assert_equal (eval result) expected
+  | None ->
+      OUnit2.assert_failure "failed in parsing"
+
+let test_1 = test_eval "3[a]" "aaa"
+
+let test_2 = test_eval "3[a]dc" "aaadc"
+
+let test_3 = test_eval "3[ab]ac2[cd]" "abababaccdcd"
+
+let test_4 = test_eval "3[a2[cd]ef]g" "acdcdefacdcdefacdcdefg"
+
+let test_4 =
+  test_eval "4[3[a2[d]]b]3[ab]2[2[f]]"
+    "addaddaddbaddaddaddbaddaddaddbaddaddaddbabababffff"
+
+let () =
+  let suite = "suite" >::: [test_1; test_2; test_3; test_4] in
+  run_test_tt_main suite
