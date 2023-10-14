@@ -61,3 +61,4 @@ _opam/
 .vscode
 
 .DS_Store
+cmake-build
