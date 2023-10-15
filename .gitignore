@@ -62,3 +62,4 @@ _opam/
 
 .DS_Store
 cmake-build
+.cache
