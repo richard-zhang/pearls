@@ -1,0 +1,4 @@
+(executable
+ (public_name bfs)
+ (name main)
+ (libraries bfs))
