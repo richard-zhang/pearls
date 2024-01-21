@@ -11,6 +11,7 @@ module type ApplicativeFunctor = sig
   val ( <*> ) : ('a -> 'b) t -> 'a t -> 'b t
 end
 
+(* #tech: need to exposed the abstract type definition *)
 module IdentityFunctor : ApplicativeFunctor with type 'a t = 'a = struct
   type 'a t = 'a
 
@@ -177,6 +178,7 @@ type t = E : 'a * ('a -> 'a) * ('a -> string) -> t
 
 (* Day constructor need to be exposed to user, cannot be kept as abstracted *)
 
+(* #tech: commcomposition of two functor with modules, again the ability to expose type is important *)
 module DayFunctor =
 functor
   (M : ApplicativeFunctor)
@@ -190,7 +192,11 @@ module type ApplicativeFunctorWithPhase = functor
   (M : ApplicativeFunctor)
   (N : ApplicativeFunctor)
   -> sig
+  (* #tech: a power feature to expose the module interface of a module, this module can be the result of functor application *)
   include module type of DayFunctor (M) (N)
+
+  type 'c t = Day : ('a * 'b -> 'c) * 'a M.t * 'b N.t -> 'c t
+
   include ApplicativeFunctor with type 'a t := 'a t
 
   val phase1 : 'a M.t -> 'a t
