@@ -3,7 +3,7 @@
    - Phases in Software Architecture
 *)
 
-module type ApplicativeFunctor = sig
+module type ApplicativeFunctorSig = sig
   type 'a t
 
   val pure : 'a -> 'a t
@@ -12,7 +12,7 @@ module type ApplicativeFunctor = sig
 end
 
 (* #tech: need to exposed the abstract type definition *)
-module IdentityFunctor : ApplicativeFunctor with type 'a t = 'a = struct
+module IdentityFunctor : ApplicativeFunctorSig with type 'a t = 'a = struct
   type 'a t = 'a
 
   let pure x = x
@@ -20,7 +20,33 @@ module IdentityFunctor : ApplicativeFunctor with type 'a t = 'a = struct
   let ( <*> ) f a = f a
 end
 
-module Helper (F : ApplicativeFunctor) = struct
+module DelayIdentityFunctor :
+  ApplicativeFunctorSig with type 'a t = unit -> 'a = struct
+  type 'a t = unit -> 'a
+
+  let pure x () = x
+  let ( <$> ) f a () = f (a ())
+
+  let ( <*> ) f a () =
+    let f' = f () in
+    let a' = a () in
+    f' a'
+end
+
+module ListFunctor : ApplicativeFunctorSig with type 'a t = 'a list = struct
+  type 'a t = 'a list
+
+  let pure x = [ x ]
+  let rec ( <$> ) f = function [] -> [] | x :: xs -> f x :: (f <$> xs)
+
+  let rec ( <*> ) funcs elems =
+    match (funcs, elems) with
+    | f :: fs, e :: es -> f e :: (fs <*> es)
+    | [], _ -> []
+    | _, [] -> []
+end
+
+module Helper (F : ApplicativeFunctorSig) = struct
   open F
 
   let unit = F.pure ()
@@ -29,21 +55,24 @@ module Helper (F : ApplicativeFunctor) = struct
 end
 
 (* Applicative Traversal *)
-module type Traversal = functor (F : ApplicativeFunctor) -> sig
-  type 'a t
 
-  val traverse : ('a -> 'b F.t) -> 'a t -> 'b t F.t
+(* Interface of a traversal: need contain a applicative defintion representing the effect of each individual travere
+   and a container type
+*)
+module type TraversalSig = sig
+  type 'a t
+  type 'a f
+
+  val traverse : ('a -> 'b f) -> 'a t -> 'b t f
 end
 
-(*
-Well-behaved traversals are those satisfying three axioms of naturality, linearity, and unitarity Natural
-*)
-
-module ListTraversal =
+module ListTraversal : functor (F : ApplicativeFunctorSig) ->
+  TraversalSig with type 'a f = 'a F.t and type 'a t = 'a list =
 functor
-  (F : ApplicativeFunctor)
+  (F : ApplicativeFunctorSig)
   ->
   struct
+    type 'a f = 'a F.t
     type 'a t = 'a list
 
     open F
@@ -53,8 +82,29 @@ functor
       | x :: xs -> List.cons <$> f x <*> traverse f xs
   end
 
+(*
+Well-behaved traversals are those satisfying three axioms of naturality, linearity, and unitarity Natural
+*)
+
 (* forest a = [tree a] *)
 type 'a tree = Node of ('a * 'a tree list)
+
+module TreeFunctor : ApplicativeFunctorSig with type 'a t = 'a tree = struct
+  type 'a t = 'a tree
+
+  let pure x = Node (x, [])
+
+  let rec ( <$> ) f = function
+    | Node (value, forest) ->
+        Node (f value, ListFunctor.( <$> ) (( <$> ) f) forest)
+
+  (* shpae must be the same *)
+  let rec ( <*> ) f_tree tree =
+    match (f_tree, tree) with
+    | Node (f, f_forest), Node (t, t_forest) ->
+        let tem = ListFunctor.( <$> ) ( <*> ) f_forest in
+        Node (f t, ListFunctor.( <*> ) tem t_forest)
+end
 
 (*
 3 - 1 - 1 
@@ -73,13 +123,15 @@ let t =
 
 (* depth first traversl *)
 
-module DfsTreeTraversal =
+module DfsTreeTraversal : functor (F : ApplicativeFunctorSig) ->
+  TraversalSig with type 'a f = 'a F.t and type 'a t = 'a tree =
 functor
-  (F : ApplicativeFunctor)
+  (F : ApplicativeFunctorSig)
   ->
   struct
     module ListTraverse = ListTraversal (F)
 
+    type 'a f = 'a F.t
     type 'a t = 'a tree
 
     open F
@@ -98,6 +150,8 @@ let%test_unit "dfs tree traversal" =
 
 (* what about breath-first traversal *)
 
+(* breath-first enumeration *)
+
 (* first approach: level order traversal *)
 let rec lzw f left right =
   match (left, right) with
@@ -107,6 +161,13 @@ let rec lzw f left right =
 
 let rec levels = function Node (x, ts) -> [ x ] :: levelsF ts
 and levelsF kids = kids |> List.map levels |> List.fold_left (lzw ( @ )) []
+
+(* breath first enumeration is defined to be *)
+let bf tree = tree |> levels |> List.concat
+
+let%test_unit "breath first enumeration" =
+  print_newline ();
+  t |> bf |> List.iter (fun i -> Printf.printf "%d," i)
 
 let print_tree_by_levels t =
   let f i content =
@@ -119,6 +180,72 @@ let print_tree_by_levels t =
 let%test_unit "level order traversal of t" =
   print_newline ();
   print_tree_by_levels t
+
+(* breath first enumeration is not reversible : one cannot reconstruct the input the function based on the output of the function *)
+
+(* The missing information is the shape of the tree, i.e. tree with tuple as the value *)
+let shape tree = TreeFunctor.( <$> ) (fun _ -> ()) tree
+
+let rec relabel shape level_enumeration =
+  match (shape, level_enumeration) with
+  | Node ((), ts), (x :: xs) :: xss ->
+      let us, yss = relabelF ts xss in
+      (Node (x, us), xs :: yss)
+  | _, _ -> failwith "level_enumeration didn't match the shape"
+
+and relabelF forest xss =
+  match forest with
+  | [] -> ([], xss)
+  | t :: ts ->
+      let label_t, remain = relabel t xss in
+      let rest, remain = relabelF ts remain in
+      (label_t :: rest, remain)
+
+(*
+  A tree can be constructed by its level order traversal plus its shape
+  A tree can also produce level order traversal and output its shape 
+  This is a bijection definition. A <=> B
+*)
+
+let split t = (shape t, levels t)
+let combine shape level_enumeration = relabel shape level_enumeration |> fst
+
+(*
+  Traversing on a list is very easy
+  Problem solving technique: convert a hard problem into a problem we know how to solve
+*)
+
+module FirstPrincipleBfsTreeTraversal : functor (F : ApplicativeFunctorSig) ->
+  TraversalSig with type 'a f = 'a F.t and type 'a t = 'a tree =
+functor
+  (F : ApplicativeFunctorSig)
+  ->
+  struct
+    module ListTraverse = ListTraversal (F)
+    (*
+    (a      -> b      f) -> a      list -> b      list f
+    (a list -> b list f) -> a list list -> b list list f
+    *)
+
+    type 'a f = 'a F.t
+    type 'a t = 'a tree
+
+    open F
+
+    let traverse f tree =
+      let shape, levels = split tree in
+      let traverse_list = ListTraverse.traverse f in
+      let traverse_level = ListTraverse.traverse traverse_list in
+      let effect_traverse = traverse_level levels in
+      let construct_tree_from_level = combine shape in
+      construct_tree_from_level <$> effect_traverse
+  end
+
+let%test_unit "bfs tree trasersal \n" =
+  let print i () = Printf.printf "%i, " i in
+  let module Traverse = FirstPrincipleBfsTreeTraversal (DelayIdentityFunctor) in
+  let a = Traverse.traverse print t in
+  assert (a () = shape t)
 
 (* repmin problem replace every element of a tree with the minimum element in that tree *)
 
@@ -181,23 +308,20 @@ type t = E : 'a * ('a -> 'a) * ('a -> string) -> t
 (* #tech: commcomposition of two functor with modules, again the ability to expose type is important *)
 module DayFunctor =
 functor
-  (M : ApplicativeFunctor)
-  (N : ApplicativeFunctor)
+  (M : ApplicativeFunctorSig)
+  (N : ApplicativeFunctorSig)
   ->
   struct
     type 'c t = Day : ('a * 'b -> 'c) * 'a M.t * 'b N.t -> 'c t
   end
 
 module type ApplicativeFunctorWithPhase = functor
-  (M : ApplicativeFunctor)
-  (N : ApplicativeFunctor)
+  (M : ApplicativeFunctorSig)
+  (N : ApplicativeFunctorSig)
   -> sig
-  (* #tech: a power feature to expose the module interface of a module, this module can be the result of functor application *)
-  include module type of DayFunctor (M) (N)
-
   type 'c t = Day : ('a * 'b -> 'c) * 'a M.t * 'b N.t -> 'c t
 
-  include ApplicativeFunctor with type 'a t := 'a t
+  include ApplicativeFunctorSig with type 'a t := 'a t
 
   val phase1 : 'a M.t -> 'a t
   val phase2 : 'a N.t -> 'a t
@@ -205,11 +329,12 @@ end
 
 module Day : ApplicativeFunctorWithPhase =
 functor
-  (M : ApplicativeFunctor)
-  (N : ApplicativeFunctor)
+  (M : ApplicativeFunctorSig)
+  (N : ApplicativeFunctorSig)
   ->
   struct
-    include DayFunctor (M) (N)
+    (* include DayFunctor (M) (N) *)
+    type 'c t = Day : ('a * 'b -> 'c) * 'a M.t * 'b N.t -> 'c t
 
     let unit = Day (unitr, M.pure (), N.pure ())
 
@@ -234,7 +359,7 @@ functor
   end
 
 module type ApplicativeFunctorWithCombinedPhase = functor
-  (M : ApplicativeFunctor)
+  (M : ApplicativeFunctorSig)
   -> sig
   include module type of Day (M) (M)
 
@@ -243,7 +368,7 @@ end
 
 module CombinedDay : ApplicativeFunctorWithCombinedPhase =
 functor
-  (M : ApplicativeFunctor)
+  (M : ApplicativeFunctorSig)
   ->
   struct
     include Day (M) (M)
@@ -254,19 +379,6 @@ functor
       (* run ma first and then run m b *)
       f <$> HelperM.cross ma mb
   end
-
-module DelayIdentityFunctor : ApplicativeFunctor with type 'a t = unit -> 'a =
-struct
-  type 'a t = unit -> 'a
-
-  let pure x () = x
-  let ( <$> ) f a () = f (a ())
-
-  let ( <*> ) f a () =
-    let f' = f () in
-    let a' = a () in
-    f' a'
-end
 
 module Example = CombinedDay (DelayIdentityFunctor)
 module HelperExample = Helper (Example)
@@ -296,7 +408,7 @@ module type MakeWriterApplicativeFunctorSig = functor
   -> sig
   type 'a t = 'a * Monoid.t
 
-  include ApplicativeFunctor with type 'a t := 'a t
+  include ApplicativeFunctorSig with type 'a t := 'a t
 
   val write : Monoid.t -> unit t
   val runWriter : 'a t -> 'a * Monoid.t
@@ -325,7 +437,7 @@ end
 module type MakeReaderApplicativeFunctorSig = functor (Env : EnvType) -> sig
   type 'a t = Env.t -> 'a
 
-  include ApplicativeFunctor with type 'a t := 'a t
+  include ApplicativeFunctorSig with type 'a t := 'a t
 
   val ask : Env.t t
   val runReader : 'a t -> Env.t -> 'a
