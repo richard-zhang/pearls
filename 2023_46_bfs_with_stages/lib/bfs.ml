@@ -66,6 +66,14 @@ module type TraversalSig = sig
   val traverse : ('a -> 'b f) -> 'a t -> 'b t f
 end
 
+(*
+The signature is designed to satisfy the following requirement
+1. functor
+2. container type
+3. various traverse implementation even upon on the same container type
+4. expose 1 and 2
+*)
+
 module ListTraversal : functor (F : ApplicativeFunctorSig) ->
   TraversalSig with type 'a f = 'a F.t and type 'a t = 'a list =
 functor
@@ -160,7 +168,7 @@ let rec lzw f left right =
   | xs, [] -> xs
 
 let rec levels = function Node (x, ts) -> [ x ] :: levelsF ts
-and levelsF kids = kids |> List.map levels |> List.fold_left (lzw ( @ )) []
+and levelsF forest = forest |> List.map levels |> List.fold_left (lzw ( @ )) []
 
 (* breath first enumeration is defined to be *)
 let bf tree = tree |> levels |> List.concat
@@ -208,6 +216,20 @@ and relabelF forest xss =
 *)
 
 let split t = (shape t, levels t)
+
+let unzip list =
+  List.fold_right (fun (x, y) (xs, ys) -> (x :: xs, y :: ys)) list ([], [])
+
+(* one optimize strategy fusion: split is done by two traversals but we can fuse them into one traversal *)
+let rec fuse_split = function
+  | Node (x, ts) ->
+      let forest, levels = fuse_split_f ts in
+      (Node ((), forest), [ x ] :: levels)
+
+and fuse_split_f forest =
+  let forest, levels = forest |> List.map fuse_split |> unzip in
+  (forest, List.fold_left (lzw ( @ )) [] levels)
+
 let combine shape level_enumeration = relabel shape level_enumeration |> fst
 
 (*
@@ -233,7 +255,7 @@ functor
     open F
 
     let traverse f tree =
-      let shape, levels = split tree in
+      let shape, levels = fuse_split tree in
       let traverse_list = ListTraverse.traverse f in
       let traverse_level = ListTraverse.traverse traverse_list in
       let effect_traverse = traverse_level levels in
@@ -246,6 +268,19 @@ let%test_unit "bfs tree trasersal \n" =
   let module Traverse = FirstPrincipleBfsTreeTraversal (DelayIdentityFunctor) in
   let a = Traverse.traverse print t in
   assert (a () = shape t)
+
+(*
+Implement an efficient breath first traersal now becomes a problem of reducing 
+the number of traversal on a tree
+*)
+
+(*
+   A king of program:
+   - circular definitions
+   - fusing together multiple passes
+  
+   repmin is a typical problem
+*)
 
 (* repmin problem replace every element of a tree with the minimum element in that tree *)
 
@@ -297,6 +332,28 @@ let twist (a, b) = (b, a)
 let exch4 ((a, b), (c, d)) = ((a, c), (b, d))
 let cross f g (x, y) = (f x, g y)
 
+(*
+  Core insight: two traversal can be fused together
+  traverse f t `cross` traverse g t = fmap unzip (traverse (fun x -> f x `cross` g x) t)
+  Core insight:
+
+  Fusing traversal with effect is usually not equivalent due to interleaving of effects.
+*)
+
+module type FirstOrderFunctorSig = functor (_ : Map.OrderedType) ->
+  Map.OrderedType
+
+module type SecondOrderFunctorSig = functor (_ : FirstOrderFunctorSig) ->
+  Map.OrderedType
+
+module SeondOrderModule : SecondOrderFunctorSig =
+functor
+  (FirstOrderFunctorSig : FirstOrderFunctorSig)
+  ->
+  struct
+    include FirstOrderFunctorSig (Int)
+  end
+
 (* GADT *)
 type t = E : 'a * ('a -> 'a) * ('a -> string) -> t
 
@@ -308,65 +365,57 @@ type t = E : 'a * ('a -> 'a) * ('a -> string) -> t
 (* #tech: commcomposition of two functor with modules, again the ability to expose type is important *)
 module DayFunctor =
 functor
-  (M : ApplicativeFunctorSig)
-  (N : ApplicativeFunctorSig)
+  (F : ApplicativeFunctorSig)
+  (G : ApplicativeFunctorSig)
   ->
   struct
-    type 'c t = Day : ('a * 'b -> 'c) * 'a M.t * 'b N.t -> 'c t
+    type 'a f = 'a F.t
+    type 'a g = 'a G.t
+    type 'c t = Day : ('a * 'b -> 'c) * 'a f * 'b g -> 'c t
   end
 
 module type ApplicativeFunctorWithPhase = functor
-  (M : ApplicativeFunctorSig)
-  (N : ApplicativeFunctorSig)
+  (F : ApplicativeFunctorSig)
+  (G : ApplicativeFunctorSig)
   -> sig
-  type 'c t = Day : ('a * 'b -> 'c) * 'a M.t * 'b N.t -> 'c t
-
+  include module type of DayFunctor (F) (G)
   include ApplicativeFunctorSig with type 'a t := 'a t
 
-  val phase1 : 'a M.t -> 'a t
-  val phase2 : 'a N.t -> 'a t
+  val phase1 : 'a f -> 'a t
+  val phase2 : 'a g -> 'a t
 end
 
 module Day : ApplicativeFunctorWithPhase =
 functor
-  (M : ApplicativeFunctorSig)
-  (N : ApplicativeFunctorSig)
+  (F : ApplicativeFunctorSig)
+  (G : ApplicativeFunctorSig)
   ->
   struct
-    (* include DayFunctor (M) (N) *)
-    type 'c t = Day : ('a * 'b -> 'c) * 'a M.t * 'b N.t -> 'c t
+    include DayFunctor (F) (G)
 
-    let unit = Day (unitr, M.pure (), N.pure ())
+    let unit = Day (unitr, F.pure (), G.pure ())
 
     let ( <$> ) f a =
       match a with Day (g, ma, nb) -> Day ((fun x -> x |> g |> f), ma, nb)
 
     let pure a = Fun.const a <$> unit
 
-    module HelperM = Helper (M)
-    module HelperN = Helper (N)
+    module HelperF = Helper (F)
+    module HelperG = Helper (G)
 
     let ( <*> ) dayf daya =
       match (dayf, daya) with
       | Day (f, ma, nb), Day (g, ma', nb') ->
-          let m_pair = HelperM.cross ma ma' in
-          let n_pair = HelperN.cross nb nb' in
+          let m_pair = HelperF.cross ma ma' in
+          let n_pair = HelperG.cross nb nb' in
           let h ((a, a_1), (b, b_1)) = (f (a, b)) (g (a_1, b_1)) in
           Day (h, m_pair, n_pair)
 
-    let phase1 ma = Day ((fun (x, _) -> x), ma, HelperN.unit)
-    let phase2 nb = Day ((fun (_, y) -> y), HelperM.unit, nb)
+    let phase1 ma = Day ((fun (x, _) -> x), ma, HelperG.unit)
+    let phase2 nb = Day ((fun (_, y) -> y), HelperF.unit, nb)
   end
 
-module type ApplicativeFunctorWithCombinedPhase = functor
-  (M : ApplicativeFunctorSig)
-  -> sig
-  include module type of Day (M) (M)
-
-  val runDay : 'a t -> 'a M.t
-end
-
-module CombinedDay : ApplicativeFunctorWithCombinedPhase =
+module DayWithSameFeect =
 functor
   (M : ApplicativeFunctorSig)
   ->
@@ -380,7 +429,7 @@ functor
       f <$> HelperM.cross ma mb
   end
 
-module Example = CombinedDay (DelayIdentityFunctor)
+module Example = DayWithSameFeect (DelayIdentityFunctor)
 module HelperExample = Helper (Example)
 
 let%test_unit "running" =
@@ -403,9 +452,7 @@ module type MonoidType = sig
   val empty : t
 end
 
-module type MakeWriterApplicativeFunctorSig = functor
-  (Monoid : MonoidType)
-  -> sig
+module type MakeWriterSig = functor (Monoid : MonoidType) -> sig
   type 'a t = 'a * Monoid.t
 
   include ApplicativeFunctorSig with type 'a t := 'a t
@@ -414,7 +461,7 @@ module type MakeWriterApplicativeFunctorSig = functor
   val runWriter : 'a t -> 'a * Monoid.t
 end
 
-module MakeWriterApplicativeFunctor : MakeWriterApplicativeFunctorSig =
+module MakeWriter : MakeWriterSig =
 functor
   (Monoid : MonoidType)
   ->
@@ -434,7 +481,7 @@ module type EnvType = sig
   type t
 end
 
-module type MakeReaderApplicativeFunctorSig = functor (Env : EnvType) -> sig
+module type MakeReaderSig = functor (Env : EnvType) -> sig
   type 'a t = Env.t -> 'a
 
   include ApplicativeFunctorSig with type 'a t := 'a t
@@ -443,7 +490,7 @@ module type MakeReaderApplicativeFunctorSig = functor (Env : EnvType) -> sig
   val runReader : 'a t -> Env.t -> 'a
 end
 
-module MakeReaderApplicativeFunctor : MakeReaderApplicativeFunctorSig =
+module MakeReader : MakeReaderSig =
 functor
   (Env : EnvType)
   ->
@@ -469,21 +516,17 @@ end = struct
   let concat = Int.min
 end
 
-module WInt = MakeWriterApplicativeFunctor (MinInt)
-module RInt = MakeReaderApplicativeFunctor (MinInt)
+module WInt = MakeWriter (MinInt)
+module RInt = MakeReader (MinInt)
 module WRIntDay = Day (WInt) (RInt)
 
 let rec minAux (t : int tree) : unit WInt.t =
   let open WInt in
   let open Helper (WInt) in
   match t with
-  | Node (value, []) -> write value
-  | Node (value, x :: xs) ->
-      let trees =
-        xs |> List.map minAux
-        |> List.fold_left (fun acc x -> acc *> x) (minAux x)
-      in
-      write value *> trees
+  | Node (value, forest) ->
+      forest |> List.map minAux
+      |> List.fold_left (fun acc x -> acc *> x) (write value)
 
 let rec replaceAux : int tree -> int tree RInt.t = function
   | Node (_, trees) ->
@@ -509,8 +552,8 @@ let runWRintDay (t : 'a WRIntDay.t) : 'a =
       let y = RInt.runReader rb minimum in
       f (x, y)
 
-let%test_unit "repmin: day naive example" =
-  print_newline ();
+let%test_unit "\nrepmin: day naive example 1\n" =
+  print_endline "hello, world";
   t |> repminAux |> runWRintDay |> print_tree_by_levels
 
 module WRIntTreeTraveral = DfsTreeTraversal (WRIntDay)
@@ -523,7 +566,7 @@ let repminDayAdv (t : int tree) : int tree =
          phase1 (WInt.write x) *> phase2 RInt.ask)
   |> runWRintDay
 
-let%test_unit "repmin: day naive example" =
+let%test_unit "repmin: day naive example 2" =
   print_newline ();
   t |> repminDayAdv |> print_tree_by_levels
 
