@@ -374,7 +374,7 @@ functor
     type 'c t = Day : ('a * 'b -> 'c) * 'a f * 'b g -> 'c t
   end
 
-module type ApplicativeFunctorWithPhase = functor
+module type DayApplicativeFunctorWithPhase = functor
   (F : ApplicativeFunctorSig)
   (G : ApplicativeFunctorSig)
   -> sig
@@ -385,7 +385,7 @@ module type ApplicativeFunctorWithPhase = functor
   val phase2 : 'a g -> 'a t
 end
 
-module Day : ApplicativeFunctorWithPhase =
+module Day : DayApplicativeFunctorWithPhase =
 functor
   (F : ApplicativeFunctorSig)
   (G : ApplicativeFunctorSig)
@@ -520,30 +520,71 @@ module WInt = MakeWriter (MinInt)
 module RInt = MakeReader (MinInt)
 module WRIntDay = Day (WInt) (RInt)
 
-let rec minAux (t : int tree) : unit WInt.t =
+let rec min_aux (t : int tree) : unit WInt.t =
   let open WInt in
   let open Helper (WInt) in
   match t with
   | Node (value, forest) ->
-      forest |> List.map minAux
+      forest |> List.map min_aux
       |> List.fold_left (fun acc x -> acc *> x) (write value)
 
-let rec replaceAux : int tree -> int tree RInt.t = function
+let min_aux_in_traverse : int tree -> unit tree WInt.t =
+  let module M = DfsTreeTraversal (WInt) in
+  M.traverse WInt.write
+
+let rec replace_aux : int tree -> int tree RInt.t = function
   | Node (_, trees) ->
       let open RInt in
       let open Helper (RInt) in
       let tree =
-        trees |> List.map replaceAux
+        trees |> List.map replace_aux
         |> Fun.flip
              (List.fold_right (fun a acc -> List.cons <$> a <*> acc))
              (pure [])
       in
       node <$> ask <*> tree
 
-let repminAux (t : int tree) : int tree WRIntDay.t =
+let replace_aux_in_traverse : int tree -> int tree RInt.t =
+  let module M = DfsTreeTraversal (RInt) in
+  M.traverse (Fun.const RInt.ask)
+
+let repmin_aux (t : int tree) : int tree WRIntDay.t =
   let open WRIntDay in
   let open Helper (WRIntDay) in
-  phase1 (minAux t) *> phase2 (replaceAux t)
+  phase1 (min_aux t) *> phase2 (replace_aux t)
+
+let repmin_aux_in_traverse (t : int tree) : int tree WRIntDay.t =
+  let open WRIntDay in
+  let open Helper (WRIntDay) in
+  phase1 (min_aux_in_traverse t) *> phase2 (replace_aux_in_traverse t)
+
+let repmin_fusion =
+  let open WRIntDay in
+  let open Helper (WRIntDay) in
+  let module M = DfsTreeTraversal (WRIntDay) in
+  M.traverse (fun x -> phase1 (WInt.write x) *> phase2 RInt.ask)
+
+(*
+the original problem has a type signature int tree -> int tree
+now, we have int tree -> int tree WRIntDay.t
+We need int tree WRIntDay.t -> int tree
+There're two ways parWR and seqWR
+*)
+
+let seqWR : 'a WRIntDay.t -> 'a = function
+  | Day (f, writer, reader) ->
+      let x, s = WInt.runWriter writer in
+      let y = RInt.runReader reader s in
+      f (x, y)
+
+(*
+some equational reasoning:
+
+phase1 and phase 2 : a f -> a f*g or a g -> a f*g are
+morphism in applicative functor (the category where the object are applicative functor)
+
+phase1 (traverse f) = traverse (phase1 f)
+*)
 
 let runWRintDay (t : 'a WRIntDay.t) : 'a =
   match t with
@@ -554,7 +595,7 @@ let runWRintDay (t : 'a WRIntDay.t) : 'a =
 
 let%test_unit "\nrepmin: day naive example 1\n" =
   print_endline "hello, world";
-  t |> repminAux |> runWRintDay |> print_tree_by_levels
+  t |> repmin_aux |> runWRintDay |> print_tree_by_levels
 
 module WRIntTreeTraveral = DfsTreeTraversal (WRIntDay)
 
@@ -570,4 +611,69 @@ let%test_unit "repmin: day naive example 2" =
   print_newline ();
   t |> repminDayAdv |> print_tree_by_levels
 
-(* multi phases *)
+(* biased version of day functor *)
+module BiasedDayFunctor =
+functor
+  (F : ApplicativeFunctorSig)
+  (G : ApplicativeFunctorSig)
+  ->
+  struct
+    type 'a f = 'a F.t
+    type 'a g = 'a G.t
+    type 'a t = Day' : ('b -> 'a) f * 'b g -> 'a t
+  end
+
+(* 5. multi phases *)
+
+(*
+ Pure no effect   
+ Link add one more effectful phase 
+*)
+module PhaseFunctor =
+functor
+  (F : ApplicativeFunctorSig)
+  ->
+  struct
+    type 'a f = 'a F.t
+
+    (* each additional link = a combining function and a collection of values *)
+    type 'a t =
+      | Pure : 'a -> 'a t
+      | Link : ('a * 'b -> 'c) * 'a f * 'b t -> 'c t
+  end
+
+module type PhaseFunctorSig = functor (F : ApplicativeFunctorSig) ->
+  ApplicativeFunctorSig with type 'a t = 'a PhaseFunctor(F).t
+
+module PhaseApplicativeFunctor : PhaseFunctorSig =
+functor
+  (F : ApplicativeFunctorSig)
+  ->
+  struct
+    include PhaseFunctor (F)
+
+    let pure a = Pure a
+
+    let ( <$> ) f = function
+      | Pure v -> Pure (f v)
+      | Link (g, effect, phase) ->
+          let apply_g_after_effect x = f (g x) in
+          Link (apply_g_after_effect, effect, phase)
+
+    let exch4 ((a, b), (c, d)) = ((a, c), (b, d))
+    let fun_cross f g (x, y) = (f x, g y)
+
+    (* polymorphic recursion function *)
+    (* add explicit universal quantification to abstrac type a, b*)
+    let rec cross : type a b. a t -> b t -> (a * b) t =
+     fun phase1 phase2 ->
+      match (phase1, phase2) with
+      | Pure x, _ -> (fun z -> (x, z)) <$> phase2
+      | _, Pure y -> (fun z -> (z, y)) <$> phase1
+      | Link (f, xs, ys), Link (g, zs, ws) ->
+          let module FHelper = Helper (F) in
+          let combine_f_g x = x |> exch4 |> fun_cross f g in
+          Link (combine_f_g, FHelper.cross xs zs, cross ys ws)
+
+    let ( <*> ) f a = (fun (f, a) -> f a) <$> cross f a
+  end
