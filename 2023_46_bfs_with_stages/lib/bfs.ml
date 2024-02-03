@@ -3,6 +3,12 @@
    - Phases in Software Architecture
 *)
 
+module type FunctorSig = sig
+  type 'a t
+
+  val ( <$> ) : ('a -> 'b) -> 'a t -> 'b t
+end
+
 module type ApplicativeFunctorSig = sig
   type 'a t
 
@@ -52,6 +58,7 @@ module Helper (F : ApplicativeFunctorSig) = struct
   let unit = F.pure ()
   let cross a b = (fun x y -> (x, y)) <$> a <*> b
   let ( *> ) ma mb = snd <$> cross ma mb
+  let fmap = ( <$> )
 end
 
 (* Applicative Traversal *)
@@ -415,7 +422,7 @@ functor
     let phase2 nb = Day ((fun (_, y) -> y), HelperF.unit, nb)
   end
 
-module DayWithSameFeect =
+module DayWithSameEffect =
 functor
   (M : ApplicativeFunctorSig)
   ->
@@ -429,7 +436,7 @@ functor
       f <$> HelperM.cross ma mb
   end
 
-module Example = DayWithSameFeect (DelayIdentityFunctor)
+module Example = DayWithSameEffect (DelayIdentityFunctor)
 module HelperExample = Helper (Example)
 
 let%test_unit "running" =
@@ -631,7 +638,7 @@ functor
 *)
 module PhaseFunctor =
 functor
-  (F : ApplicativeFunctorSig)
+  (F : FunctorSig)
   ->
   struct
     type 'a f = 'a F.t
@@ -641,9 +648,41 @@ functor
       | Pure : 'a -> 'a t
       | Link : ('a * 'b -> 'c) * 'a f * 'b t -> 'c t
   end
+(*
+   module type PhaseFunctorSig = functor (F : ApplicativeFunctorSig) ->
+     ApplicativeFunctorSig with type 'a t = 'a PhaseFunctor(F).t *)
 
-module type PhaseFunctorSig = functor (F : ApplicativeFunctorSig) ->
-  ApplicativeFunctorSig with type 'a t = 'a PhaseFunctor(F).t
+module type PhaseFunctorSig = functor (F : ApplicativeFunctorSig) -> sig
+  include module type of PhaseFunctor (F)
+  include ApplicativeFunctorSig with type 'a t := 'a t
+end
+
+module PhaseApplicativeFunctorFree : functor (F : FunctorSig) ->
+  ApplicativeFunctorSig with type 'a t = 'a PhaseFunctor(F).t =
+functor
+  (F : FunctorSig)
+  ->
+  struct
+    include PhaseFunctor (F)
+
+    let pure a = Pure a
+
+    let ( <$> ) g = function
+      | Pure v -> Pure (g v)
+      | Link (f, xs, ys) ->
+          let comp x = g (f x) in
+          Link (comp, xs, ys)
+
+    let rec cross : type a b. a t -> b t -> (a * b) t =
+     fun phase1 phase2 ->
+      match phase1 with
+      | Pure x -> (fun y -> (x, y)) <$> phase2
+      | Link (f, xs, ys) ->
+          let comp (x, (y, z)) = (f (x, y), z) in
+          Link (comp, xs, cross ys phase2)
+
+    let ( <*> ) f a = (fun (f, a) -> f a) <$> cross f a
+  end
 
 module PhaseApplicativeFunctor : PhaseFunctorSig =
 functor
@@ -666,10 +705,10 @@ functor
     (* polymorphic recursion function *)
     (* add explicit universal quantification to abstrac type a, b*)
     let rec cross : type a b. a t -> b t -> (a * b) t =
-     fun phase1 phase2 ->
-      match (phase1, phase2) with
-      | Pure x, _ -> (fun z -> (x, z)) <$> phase2
-      | _, Pure y -> (fun z -> (z, y)) <$> phase1
+     fun left right ->
+      match (left, right) with
+      | Pure x, _ -> (fun z -> (x, z)) <$> right
+      | _, Pure y -> (fun z -> (z, y)) <$> left
       | Link (f, xs, ys), Link (g, zs, ws) ->
           let module FHelper = Helper (F) in
           let combine_f_g x = x |> exch4 |> fun_cross f g in
@@ -677,3 +716,49 @@ functor
 
     let ( <*> ) f a = (fun (f, a) -> f a) <$> cross f a
   end
+
+module PhaseHelper (F : ApplicativeFunctorSig) = struct
+  open PhaseApplicativeFunctor (F)
+  open Helper (F)
+
+  let rec runPhase : type a. a t -> a f = function
+    | Pure x -> F.pure x
+    | Link (f, fa, b) ->
+        let fb = runPhase b in
+        let fab = cross fa fb in
+        fmap f fab
+
+  let now : 'a f -> 'a t = fun effect -> Link (unitr, effect, Pure ())
+  let later : 'a t -> 'a t = fun phase -> Link (unitl, F.pure (), phase)
+
+  let rec phase : int -> 'a f -> 'a t =
+   fun level effect ->
+    match level with 1 -> now effect | n -> later (phase (n - 1) effect)
+end
+
+module DayToPhase (F : ApplicativeFunctorSig) = struct
+  module Day = DayWithSameEffect (F)
+  module Phase = PhaseApplicativeFunctor (F)
+
+  let inject : 'a Day.t -> 'a Phase.t = function
+    | Day (f, phase_one, phase_two) ->
+        Link (f, phase_one, Link (unitr, phase_two, Pure ()))
+end
+
+let%test_unit "multi-phase example" =
+  let module Effect = DelayIdentityFunctor in
+  let module Phase = PhaseApplicativeFunctor (Effect) in
+  let module PhaseHelper = PhaseHelper (Effect) in
+  let open PhaseHelper in
+  let open Helper (Phase) in
+  print_newline ();
+  runPhase
+    (phase 1 (fun () -> print_string "1")
+    *> phase 2 (fun () -> print_string "2")
+    *> phase 1 (fun () -> print_string "3")
+    *> phase 3 (fun () -> print_string "6")
+    *> phase 1 (fun () -> print_string "4")
+    *> phase 2 (fun () -> print_string "5"))
+    ()
+
+(* sort tree problem: sort the tree into ascending order, then relabels the tree with the sorted list *)

@@ -23,7 +23,7 @@ module type ApplicativeFunctorWithPhase = functor
 ```
 
 `include module type` is a powerful tool to use apply module signature of the result of functor application.
-- this is workaround, as the functor definition cannot specify the returned module signature
+- this is a workaround, as the functor definition cannot specify the returned module signature
 
 ## Module Programming 
 ```OCaml
@@ -75,3 +75,29 @@ This is the following requirement for traverse.
 3. helper module
    1. a functor
    2. do not define `'a t`
+
+## Some tips on dealing with abstract type in OCaml
+
+ 1. First of all, I found this not them useful. 99% percent of time, I want the type to be exposed and 1% percent of time I want to be abstracted so no user can see what's inside. I wish this can be inverted so that I don't those `with` type trick
+ 2. A thing I found helpful to expose type when dealing with first class module is to use `include module type`
+```OCaml
+include module type
+```
+
+This is an example
+```OCaml
+module type PhaseFunctorSig = functor (F : ApplicativeFunctorSig) ->
+   ApplicativeFunctorSig with type 'a t = 'a PhaseFunctor(F).
+```
+
+The problem of above is that Functor application remain abstract. so PhaseFunctorSig has `type 'a t = 'a PhaseFunctor(F).t` instead of the type t defined in PhaseFunctor even though PhaseFunctor is already a functor that doesn't hide the `type 'a t`
+
+I notice using include module type can help with this issue to expose the `type t`
+```OCaml
+module type PhaseFunctorSig = functor (F : ApplicativeFunctorSig) -> sig
+  include module type of PhaseFunctor (F)
+  include ApplicativeFunctorSig with type 'a t := 'a t
+end
+```
+
+See the guidance in [OCaml manual](https://v2.ocaml.org/manual/moduletypeof.html)
