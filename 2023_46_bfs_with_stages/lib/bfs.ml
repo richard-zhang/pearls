@@ -185,6 +185,7 @@ let%test_unit "breath first enumeration" =
   t |> bf |> List.iter (fun i -> Printf.printf "%d," i)
 
 let print_tree_by_levels t =
+  print_newline ();
   let f i content =
     Printf.printf "level %d: " i;
     List.iter (Printf.printf " %d,") content;
@@ -601,7 +602,6 @@ let runWRintDay (t : 'a WRIntDay.t) : 'a =
       f (x, y)
 
 let%test_unit "\nrepmin: day naive example 1\n" =
-  print_endline "hello, world";
   t |> repmin_aux |> runWRintDay |> print_tree_by_levels
 
 module WRIntTreeTraveral = DfsTreeTraversal (WRIntDay)
@@ -615,7 +615,6 @@ let repminDayAdv (t : int tree) : int tree =
   |> runWRintDay
 
 let%test_unit "repmin: day naive example 2" =
-  print_newline ();
   t |> repminDayAdv |> print_tree_by_levels
 
 (* biased version of day functor *)
@@ -718,7 +717,7 @@ functor
   end
 
 module PhaseHelper (F : ApplicativeFunctorSig) = struct
-  open PhaseApplicativeFunctor (F)
+  include PhaseApplicativeFunctor (F)
   open Helper (F)
 
   let rec runPhase : type a. a t -> a f = function
@@ -762,3 +761,215 @@ let%test_unit "multi-phase example" =
     ()
 
 (* sort tree problem: sort the tree into ascending order, then relabels the tree with the sorted list *)
+(* express sort tree using multi phase
+   phase 1. iterate the tree to get the list of element
+   phase 2. sort the list of element in ascending order
+   phase 3. traverse the tree again to relabel the tree according to the ascending order
+*)
+
+module type StateType = sig
+  type t
+end
+
+module StateFunctor (S : StateType) :
+  ApplicativeFunctorSig with type 'a t = S.t -> 'a * S.t = struct
+  type 'a t = S.t -> 'a * S.t
+
+  let pure : 'a -> 'a t = fun a s -> (a, s)
+
+  let ( <$> ) f st s =
+    let value, state = st s in
+    (f value, state)
+
+  let ( <*> ) f a s =
+    let f, f_state = f s in
+    let a, a_state = a f_state in
+    (f a, a_state)
+end
+
+module StateFunctorHelper (S : StateType) = struct
+  include StateFunctor (S)
+
+  let ( let* ) : type a b. a t -> (a -> b t) -> b t =
+   fun ma amb s ->
+    let a, state = ma s in
+    (amb a) state
+
+  let get : S.t t = fun s -> (s, s)
+  let put : S.t -> unit t = fun state _ -> ((), state)
+  let modify (modifier : S.t -> S.t) : unit t = fun s -> ((), modifier s)
+  let runState (m : 'a t) (s : S.t) = fst (m s)
+end
+
+(* mimicing second order polymorphism using type t *)
+module ListStateFunctor (S : sig
+  type t
+end) =
+struct
+  type elem = S.t
+
+  module ListState = struct
+    type t = elem list
+  end
+
+  include StateFunctorHelper (ListState)
+
+  let push : elem -> unit t = fun elem -> modify (fun s -> elem :: s)
+
+  let pop =
+    let* list_state = get in
+    let* () = put (List.tl list_state) in
+    pure (List.hd list_state)
+end
+
+let sort_tree (type a) (tree : a tree) : a tree =
+  let module S = struct
+    type t = a
+  end in
+  let module ListStateFunctor = ListStateFunctor (S) in
+  let module PhaseHelper = PhaseHelper (ListStateFunctor) in
+  let open DfsTreeTraversal (ListStateFunctor) in
+  let open PhaseHelper in
+  let open Helper (PhaseHelper) in
+  let open ListStateFunctor in
+  let sortTreeAux t =
+    phase 1 (traverse push t)
+    *> phase 2 (modify (List.sort compare))
+    *> phase 3 (traverse (fun _ -> pop) t)
+  in
+  let state = runPhase (sortTreeAux tree) in
+  runState state []
+
+(*
+3 - 1 - 1 
+ \   \    
+  \   5   
+   \
+    4 - 9
+     \
+      2
+*)
+
+(*
+1 - 4 - 9 
+ \   \    
+  \   5   
+   \
+    1 - 3
+     \
+      2
+*)
+
+let t =
+  node 3 [ node 1 [ node 1 []; node 5 [] ]; node 4 [ node 9 []; node 2 [] ] ]
+
+let expected_t =
+  node 1 [ node 1 [ node 2 []; node 3 [] ]; node 4 [ node 5 []; node 9 [] ] ]
+
+let%test_unit "test sort tree" =
+  let t = sort_tree t in
+  print_newline ();
+  print_tree_by_levels t;
+  assert (t = expected_t)
+
+let sort_tree_one_pass (type a) (tree : a tree) : a tree =
+  let module S = struct
+    type t = a
+  end in
+  let module ListStateFunctor = ListStateFunctor (S) in
+  let module PhaseHelper = PhaseHelper (ListStateFunctor) in
+  let open DfsTreeTraversal (PhaseHelper) in
+  let open PhaseHelper in
+  let open Helper (PhaseHelper) in
+  let open ListStateFunctor in
+  let sortTreeAux t =
+    phase 2 (modify (List.sort compare))
+    *> traverse (fun v -> phase 1 (push v) *> phase 3 pop) t
+  in
+  let state = runPhase (sortTreeAux tree) in
+  runState state []
+
+let%test_unit "test sort tree one pass" =
+  let t = sort_tree_one_pass t in
+  print_newline ();
+  print_tree_by_levels t;
+  assert (t = expected_t)
+
+(* how to prove sort_tree_one_pass is faster than sort_tree *)
+(*
+I'm not too sure how to prove it
+*)
+
+(* breath first traversal *)
+
+module BfsTreeTraversal : functor (F : ApplicativeFunctorSig) ->
+  TraversalSig with type 'a f = 'a F.t and type 'a t = 'a tree =
+functor
+  (F : ApplicativeFunctorSig)
+  ->
+  struct
+    type 'a t = 'a tree
+    type 'a f = 'a F.t
+
+    module PhaseFunctor = PhaseHelper (F)
+    module ListTraversal = ListTraversal (PhaseFunctor)
+
+    let rec bfsAux : type a b. (a -> b f) -> a t -> b t PhaseFunctor.t =
+     fun f tree ->
+      match tree with
+      | Node (x, forest) ->
+          let open PhaseFunctor in
+          node
+          <$> now (f x)
+          <*> later (ListTraversal.traverse (bfsAux f) forest)
+
+    let traverse f t =
+      let open PhaseFunctor in
+      t |> bfsAux f |> runPhase
+  end
+
+let%test_unit "bfs example" =
+  print_newline ();
+  let print_node v () = Printf.printf "%d\n" v in
+  let module Bfs = BfsTreeTraversal (DelayIdentityFunctor) in
+  let _ = (Bfs.traverse print_node t) () in
+  ()
+
+let bfl (type a b) (tree : a tree) (labels : b list) : b tree =
+  let module ListStateFunctor = ListStateFunctor (struct
+    type t = b
+  end) in
+  let module BfsTraversal = BfsTreeTraversal (ListStateFunctor) in
+  ListStateFunctor.runState
+    (BfsTraversal.traverse (fun _ -> ListStateFunctor.pop) tree)
+    labels
+
+let%test_unit "breath first relabelling" =
+  let labels = [ 1; 1; 1; 1; 1; 1; 1 ] in
+  let one_tree = bfl t labels in
+  print_tree_by_levels t;
+  print_tree_by_levels one_tree
+
+let repmin_using_state_monad (tree : int tree) : int tree =
+  let module StateFunctor = StateFunctorHelper (struct
+    type t = int
+  end) in
+  let module PhaseFunctor = PhaseHelper (StateFunctor) in
+  let module DfsTraversal = DfsTreeTraversal (PhaseFunctor) in
+  let write x =
+    let open StateFunctor in
+    let* v = get in
+    if x <= v then put x else pure ()
+  in
+  let fusion x =
+    let open PhaseFunctor in
+    let open Helper (PhaseFunctor) in
+    phase 1 (write x) *> phase 2 StateFunctor.get
+  in
+  StateFunctor.runState
+    (DfsTraversal.traverse fusion tree |> PhaseFunctor.runPhase)
+    Int.max_int
+
+(* repmin using state monad *)
+let%test_unit "repmin using phase functor and state monad" =
+  node 9 [ t ] |> repmin_using_state_monad |> print_tree_by_levels
