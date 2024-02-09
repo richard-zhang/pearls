@@ -17,17 +17,23 @@ module type ApplicativeFunctorSig = sig
   val ( <*> ) : ('a -> 'b) t -> 'a t -> 'b t
 end
 
+module type MonadSig = sig
+  include ApplicativeFunctorSig
+
+  val ( let* ) : 'a t -> ('a -> 'b t) -> 'b t
+end
+
 (* #tech: need to exposed the abstract type definition *)
-module IdentityFunctor : ApplicativeFunctorSig with type 'a t = 'a = struct
+module IdentityFunctor : MonadSig with type 'a t = 'a = struct
   type 'a t = 'a
 
   let pure x = x
   let ( <$> ) f = f
   let ( <*> ) f a = f a
+  let ( let* ) ma mab = mab ma
 end
 
-module DelayIdentityFunctor :
-  ApplicativeFunctorSig with type 'a t = unit -> 'a = struct
+module DelayIdentityFunctor : MonadSig with type 'a t = unit -> 'a = struct
   type 'a t = unit -> 'a
 
   let pure x () = x
@@ -37,6 +43,10 @@ module DelayIdentityFunctor :
     let f' = f () in
     let a' = a () in
     f' a'
+
+  let ( let* ) ma mab () =
+    let a = ma () in
+    (mab a) ()
 end
 
 module ListFunctor : ApplicativeFunctorSig with type 'a t = 'a list = struct

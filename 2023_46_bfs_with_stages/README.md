@@ -101,3 +101,15 @@ end
 ```
 
 See the guidance in [OCaml manual](https://v2.ocaml.org/manual/moduletypeof.html)
+
+
+## Related Application of multi-phase computation
+
+1. Functional Choreographic Programming
+- [ ] youtube video
+- [ ] play with the example
+2. back propogation once again?
+- [ ] can we express back propagation using phase
+  - forward to compute the value at each node
+  - df/du * du/dw = df/dw
+    - du/dw is expressed in terms of value of w node

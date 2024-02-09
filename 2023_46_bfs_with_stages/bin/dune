@@ -1,4 +1,4 @@
 (executable
- (public_name bfs)
+ (public_name main)
  (name main)
- (libraries bfs))
+ (libraries lib))
