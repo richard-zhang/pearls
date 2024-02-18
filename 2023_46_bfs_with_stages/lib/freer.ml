@@ -95,6 +95,39 @@ let run () =
   let handler = { f } in
   interp_freer handler example_program ()
 
+type 'a proxy = Proxy
+type ('a, 'b) eq = Eq : ('a, 'a) eq
+
+module type ParameterisedType = sig
+  type 'a t
+end
+
+type 'a ty =
+  | TFloat : float ty
+  | TTuple : 'a ty * 'b ty -> ('a * 'b) ty
+  | TAny : 'a ty
+
+module TestEquality = struct
+  let rec test_equality : type a b. a ty -> b ty -> (a, b) eq option =
+   fun a b ->
+    match (a, b) with
+    | TFloat, TFloat -> Option.some Eq
+    | TTuple (a_left, a_right), TTuple (b_left, b_right) -> (
+        let eq_left = test_equality a_left b_left in
+        let eq_right = test_equality a_right b_right in
+        match (eq_left, eq_right) with
+        | Some Eq, Some Eq -> Some Eq
+        | _, _ -> None)
+    | _, _ -> None
+end
+
+(* a depdentable type function, give a type output this, type family equivalent in OCaml *)
+
+let cast_with (type a b) (eq : (a, b) eq) (value : a) : b =
+  match eq with Eq -> value
+
+(* let is_equal (type a b) (a_proxy : a proxy) (b_proxy : b proxy) : (a, b) eq option = *)
+
 module CompGraph = struct
   module Op = struct
     (* type 'a op =
@@ -150,7 +183,9 @@ let example x =
 module M = CompGraph.InterpFreer (IdentityFunctor)
 
 let handler (env : env) : M.handler =
-  let f : type a. a CompGraph.op -> a = function
+  let f : type a. a CompGraph.op -> a =
+   fun operation ->
+    match operation with
     | Var v -> StringMap.find v env
     | Const x -> x
     | Sin x -> sin x
@@ -158,6 +193,8 @@ let handler (env : env) : M.handler =
     | Mul (a, b) -> a *. b
   in
   M.{ f }
+
+(* type dispatching mechanisms *)
 
 let%test_unit "run the example function" =
   let env = StringMap.of_seq (List.to_seq [ ("x", 3.0) ]) in
